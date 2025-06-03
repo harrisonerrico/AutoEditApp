@@ -1,0 +1,205 @@
+import os
+import subprocess
+import tempfile
+import numpy as np
+import wave
+import contextlib
+import xml.etree.ElementTree as ET
+from datetime import timedelta
+from PIL import Image
+import torch
+import clip
+import cv2
+import openai
+import json
+import whisper
+import streamlit as st
+import scenedetect
+from scenedetect import VideoManager, SceneManager
+from scenedetect.detectors import ContentDetector
+import zipfile
+import shutil
+
+st.set_page_config(page_title="Smart Auto Edit", layout="wide")
+st.title("🎬 Smart Auto Edit – Reference-Based Editor")
+
+reference_path = st.file_uploader("1. Upload Edited Reference Video", type=["mp4"])
+media_zip = st.file_uploader("2. Upload Raw Media Clips (ZIP)", type=["zip"])
+
+scenes = []
+edit_guide = []
+shot_data = []
+transcription_data = []
+
+@st.cache_data
+def transcribe_and_classify_audio(video_path):
+    model = whisper.load_model("base")
+    result = model.transcribe(video_path)
+    segments = result.get("segments", [])
+    transcription = []
+    for segment in segments:
+        text = segment.get("text", "")
+        if any(keyword in text.lower() for keyword in ["uh", "um", "like", "i think", "you know"]):
+            segment_type = "speech"
+        elif any(char.isalpha() for char in text) and text.strip().endswith("."):
+            segment_type = "speech"
+        else:
+            segment_type = "music"
+        transcription.append({"start": segment["start"], "end": segment["end"], "type": segment_type, "text": text})
+    return transcription
+
+@st.cache_data
+def extract_middle_frame(video_path, timestamp):
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+    success, frame = cap.read()
+    cap.release()
+    return frame if success else None
+
+def extract_frame_embedding(frame, model, preprocess):
+    if frame is None:
+        return torch.zeros((512,))
+    image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(image)
+    image_input = preprocess(pil_img).unsqueeze(0)
+    with torch.no_grad():
+        features = model.encode_image(image_input)
+    return features[0].numpy()
+
+def estimate_motion(video_path, start, end):
+    return abs(end - start)
+
+def get_gpt_edit_guide(features):
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+    messages = [
+        {"role": "system", "content": "You are a professional video editor assistant. Given shot-level features, describe their purpose and how they contribute to the edit."},
+        {"role": "user", "content": f"Here is a list of shots with features: {json.dumps(features)}. Provide a JSON list of guidance on how to recreate these shots using different clips based on similarity of motion, brightness, and duration."}
+    ]
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=messages,
+            temperature=0.5
+        )
+        return json.loads(response['choices'][0]['message']['content'])
+    except:
+        return []
+
+def analyze_reference(reference_path):
+    video_manager = VideoManager([str(reference_path)])
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector(threshold=30.0))
+    video_manager.set_downscale_factor()
+    video_manager.start()
+    scene_manager.detect_scenes(frame_source=video_manager)
+    scene_list = scene_manager.get_scene_list()
+    video_manager.release()
+    return [(start.get_seconds(), end.get_seconds()) for start, end in scene_list]
+
+def analyze_shot_structure(reference_path, scenes, model, preprocess):
+    results = []
+    for start, end in scenes:
+        duration = end - start
+        frame = extract_middle_frame(reference_path, start + duration / 2)
+        motion = estimate_motion(reference_path, start, end)
+        embedding = extract_frame_embedding(frame, model, preprocess)
+        results.append({
+            "start": start,
+            "end": end,
+            "duration": duration,
+            "motion": motion,
+            "embedding": embedding.tolist()
+        })
+    return results
+
+def assign_raw_clips(media_folder, shot_data, model, preprocess):
+    best_matches = []
+    for shot in shot_data:
+        best_score = float('-inf')
+        best_path = None
+        for root, _, files in os.walk(media_folder):
+            for file in files:
+                if file.endswith(".mp4"):
+                    path = os.path.join(root, file)
+                    frame = extract_middle_frame(path, 1.0)
+                    embedding = extract_frame_embedding(frame, model, preprocess)
+                    score = np.dot(shot['embedding'], embedding) / (np.linalg.norm(shot['embedding']) * np.linalg.norm(embedding) + 1e-6)
+                    if score > best_score:
+                        best_score = score
+                        best_path = path
+        shot['match'] = best_path
+    return shot_data
+
+def generate_auto_edit(shot_data, transcription_data):
+    audio_overlays = [seg for seg in transcription_data if seg['type'] == 'speech']
+    music_overlays = [seg for seg in transcription_data if seg['type'] == 'music']
+
+    for i, shot in enumerate(shot_data):
+        output_name = f"output_clip_{i+1:03d}.mp4"
+        if shot['match']:
+            start_time = 0
+            cmd = [
+                "ffmpeg", "-y", "-i", shot['match'],
+                "-ss", str(start_time), "-t", str(shot['duration']),
+                "-vf", "scale=1920:1080",
+                output_name
+            ]
+            subprocess.run(cmd)
+
+    if audio_overlays:
+        with open("audio_overlay.txt", "w") as f:
+            for seg in audio_overlays:
+                f.write(f"Speech segment: {seg['start']}s to {seg['end']}s\n")
+    if music_overlays:
+        with open("music_overlay.txt", "w") as f:
+            for seg in music_overlays:
+                f.write(f"Music segment: {seg['start']}s to {seg['end']}s\n")
+
+def export_to_capcut_xml(shot_data):
+    root = ET.Element("project")
+    timeline = ET.SubElement(root, "timeline")
+    for shot in shot_data:
+        if shot.get('match'):
+            clip_elem = ET.SubElement(timeline, "clip", {
+                "src": shot['match'],
+                "start": str(0),
+                "duration": str(int(shot['duration'] * 1000))
+            })
+    tree = ET.ElementTree(root)
+    tree.write("capcut_export.xml")
+
+if reference_path and media_zip:
+    with st.spinner("Analyzing reference and generating auto edit..."):
+        reference_file = reference_path
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as ref_temp:
+            ref_temp.write(reference_file.read())
+            ref_temp.flush()
+            reference_path = ref_temp.name
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with zipfile.ZipFile(media_zip, 'r') as zip_ref:
+                zip_ref.extractall(tmp_dir)
+
+            st.info("Running scene detection...")
+            scenes = analyze_reference(reference_path)
+            model, preprocess = clip.load("ViT-B/32", device="cpu")
+
+            st.info("Analyzing shot structure...")
+            shot_data = analyze_shot_structure(reference_path, scenes, model, preprocess)
+
+            st.info("Transcribing and classifying audio...")
+            transcription_data = transcribe_and_classify_audio(reference_path)
+
+            st.info("Getting GPT edit guidance (if available)...")
+            edit_guide = get_gpt_edit_guide(shot_data)
+
+            st.info("Assigning raw media to reference shots...")
+            shot_data = assign_raw_clips(tmp_dir, shot_data, model, preprocess)
+
+            st.info("Generating auto-edited video clips...")
+            generate_auto_edit(shot_data, transcription_data)
+
+            st.info("Exporting to CapCut XML...")
+            export_to_capcut_xml(shot_data)
+
+        st.success("Auto edit complete. All outputs generated.")

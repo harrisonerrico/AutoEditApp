@@ -1,0 +1,12 @@
+streamlit
+openai
+torch
+torchvision
+torchaudio
+git+https://github.com/openai/whisper.git
+git+https://github.com/openai/CLIP.git
+opencv-python
+scenedetect
+numpy
+Pillow
+python-dotenv
