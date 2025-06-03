@@ -27,7 +27,10 @@ st.set_page_config(page_title="Smart Auto Edit", layout="wide")
 st.title("🎬 Smart Auto Edit – Reference-Based Editor")
 
 st.subheader("1. Reference Video Input")
-ref_input_method = st.radio("Choose input method for the reference video:", ["Upload from device", "Provide Google Drive link"])
+ref_input_method = st.radio(
+    "Choose input method for the reference video:",
+    ["Upload from device", "Provide Google Drive link"]
+)
 if ref_input_method == "Upload from device":
     reference_file = st.file_uploader("Upload Edited Reference Video", type=["mp4"])
     reference_path = None
@@ -46,7 +49,7 @@ else:
             response = requests.get(download_url, stream=True)
             if "text/html" in response.headers.get("Content-Type", ""):
                 return False
-            with open(output_path, 'wb') as f:
+            with open(output_path, "wb") as f:
                 f.write(response.content)
             return True
         except:
@@ -64,7 +67,10 @@ else:
                 st.error("Failed to download a valid video file from the provided Google Drive link.")
 
 st.subheader("2. Raw Media Clips Input")
-media_input_method = st.radio("Choose input method for raw media:", ["Upload ZIP from device", "Provide Google Drive ZIP link", "Provide Google Drive folder link"])
+media_input_method = st.radio(
+    "Choose input method for raw media:",
+    ["Upload ZIP from device", "Provide Google Drive ZIP link", "Provide Google Drive folder link"]
+)
 media_zip_path = None
 media_folder_path = None
 
@@ -89,9 +95,9 @@ elif media_input_method == "Provide Google Drive folder link":
     if folder_url:
         def scrape_drive_folder(share_url, dest_folder):
             response = requests.get(share_url)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for a_tag in soup.find_all('a'):
-                href = a_tag.get('href', '')
+            soup = BeautifulSoup(response.text, "html.parser")
+            for a_tag in soup.find_all("a"):
+                href = a_tag.get("href", "")
                 if "uc?id=" in href or "file/d/" in href:
                     file_id = None
                     if "uc?id=" in href:
@@ -111,12 +117,54 @@ elif media_input_method == "Provide Google Drive folder link":
                             ext = "wav"
                         elif "audio/mpeg" in content_type:
                             ext = "mp3"
+                        elif "audio/mp4" in content_type or "audio/m4a" in content_type:
+                            ext = "m4a"
+                        elif "audio/aiff" in content_type:
+                            ext = "aiff"
+                        elif "audio/aac" in content_type:
+                            ext = "aac"
                         if ext:
-                            with open(os.path.join(dest_folder, f"file_{file_id}.{ext}"), 'wb') as out_file:
+                            out_path = os.path.join(dest_folder, f"file_{file_id}.{ext}")
+                            with open(out_path, "wb") as out_file:
                                 out_file.write(file_resp.content)
         media_folder_path = tempfile.mkdtemp()
         scrape_drive_folder(folder_url, media_folder_path)
         st.success("All supported media files downloaded from folder.")
+
+# ------------------------------------------------------------------------------
+# Processing logic begins here
+
+scenes = []
+edit_guide = []
+shot_data = []
+transcription_data = []
+
+@st.cache_data
+def transcribe_and_classify_audio(video_path):
+    model = whisper.load_model("base")
+    result = model.transcribe(video_path)
+    segments = result.get("segments", [])
+    transcription = []
+    for segment in segments:
+        text = segment.get("text", "")
+        if any(keyword in text.lower() for keyword in ["uh", "um", "like", "i think", "you know"]):
+            segment_type = "speech"
+        elif any(char.isalpha() for char in text) and text.strip().endswith("."):
+            segment_type = "speech"
+        else:
+            segment_type = "music"
+        transcription.append({
+            "start": segment["start"],
+            "end": segment["end"],
+            "type": segment_type,
+            "text": text
+        })
+    return transcription
+
+@st.cache_data
+def extract_middle_frame(video_path, timestamp):
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
     success, frame = cap.read()
     cap.release()
     return frame if success else None
@@ -137,8 +185,14 @@ def estimate_motion(video_path, start, end):
 def get_gpt_edit_guide(features):
     openai.api_key = os.getenv("OPENAI_API_KEY")
     messages = [
-        {"role": "system", "content": "You are a professional video editor assistant. Given shot-level features, describe their purpose and how they contribute to the edit."},
-        {"role": "user", "content": f"Here is a list of shots with features: {json.dumps(features)}. Provide a JSON list of guidance on how to recreate these shots using different clips based on similarity of motion, brightness, and duration."}
+        {
+            "role": "system",
+            "content": "You are a professional video editor assistant. Given shot-level features, describe their purpose and how they contribute to the edit."
+        },
+        {
+            "role": "user",
+            "content": f"Here is a list of shots with features: {json.dumps(features)}. Provide a JSON list of guidance on how to recreate these shots using different clips based on similarity of motion, brightness, and duration."
+        }
     ]
     try:
         response = openai.ChatCompletion.create(
@@ -146,7 +200,7 @@ def get_gpt_edit_guide(features):
             messages=messages,
             temperature=0.5
         )
-        return json.loads(response['choices'][0]['message']['content'])
+        return json.loads(response["choices"][0]["message"]["content"])
     except:
         return []
 
@@ -178,34 +232,38 @@ def analyze_shot_structure(reference_path, scenes, model, preprocess):
     return results
 
 def assign_raw_clips(media_folder, shot_data, model, preprocess):
-    best_matches = []
+    valid_extensions = (".mp4", ".mov", ".wav", ".mp3", ".m4a", ".aiff", ".aac")
     for shot in shot_data:
-        best_score = float('-inf')
+        best_score = float("-inf")
         best_path = None
         for root, _, files in os.walk(media_folder):
             for file in files:
-                if file.endswith((".mp4", ".mov", ".wav", ".mp3")):
+                if file.lower().endswith(valid_extensions):
                     path = os.path.join(root, file)
-                    frame = extract_middle_frame(path, 1.0)
-                    embedding = extract_frame_embedding(frame, model, preprocess)
-                    score = np.dot(shot['embedding'], embedding) / (np.linalg.norm(shot['embedding']) * np.linalg.norm(embedding) + 1e-6)
-                    if score > best_score:
-                        best_score = score
-                        best_path = path
-        shot['match'] = best_path
+                    # Only use video files for visual matching
+                    if file.lower().endswith((".mp4", ".mov")):
+                        frame = extract_middle_frame(path, 1.0)
+                        embedding = extract_frame_embedding(frame, model, preprocess)
+                        score = np.dot(shot["embedding"], embedding) / (
+                            np.linalg.norm(shot["embedding"]) * np.linalg.norm(embedding) + 1e-6
+                        )
+                        if score > best_score:
+                            best_score = score
+                            best_path = path
+        shot["match"] = best_path
     return shot_data
 
 def generate_auto_edit(shot_data, transcription_data):
-    audio_overlays = [seg for seg in transcription_data if seg['type'] == 'speech']
-    music_overlays = [seg for seg in transcription_data if seg['type'] == 'music']
+    audio_overlays = [seg for seg in transcription_data if seg["type"] == "speech"]
+    music_overlays = [seg for seg in transcription_data if seg["type"] == "music"]
 
     for i, shot in enumerate(shot_data):
         output_name = f"output_clip_{i+1:03d}.mp4"
-        if shot['match']:
+        if shot.get("match"):
             start_time = 0
             cmd = [
-                "ffmpeg", "-y", "-i", shot['match'],
-                "-ss", str(start_time), "-t", str(shot['duration']),
+                "ffmpeg", "-y", "-i", shot["match"],
+                "-ss", str(start_time), "-t", str(shot["duration"]),
                 "-vf", "scale=1920:1080",
                 output_name
             ]
@@ -224,11 +282,11 @@ def export_to_capcut_xml(shot_data):
     root = ET.Element("project")
     timeline = ET.SubElement(root, "timeline")
     for shot in shot_data:
-        if shot.get('match'):
+        if shot.get("match"):
             clip_elem = ET.SubElement(timeline, "clip", {
-                "src": shot['match'],
+                "src": shot["match"],
                 "start": str(0),
-                "duration": str(int(shot['duration'] * 1000))
+                "duration": str(int(shot["duration"] * 1000))
             })
     tree = ET.ElementTree(root)
     tree.write("capcut_export.xml")
@@ -237,7 +295,7 @@ if reference_path and (media_zip_path or media_folder_path):
     with st.spinner("Analyzing reference and generating auto edit..."):
         with tempfile.TemporaryDirectory() as tmp_dir:
             if media_zip_path:
-                with zipfile.ZipFile(media_zip_path, 'r') as zip_ref:
+                with zipfile.ZipFile(media_zip_path, "r") as zip_ref:
                     zip_ref.extractall(tmp_dir)
             elif media_folder_path:
                 tmp_dir = media_folder_path
