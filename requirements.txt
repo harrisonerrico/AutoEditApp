@@ -1,7 +1,6 @@
 streamlit
 torch
 clip-anytorch
-opencv-python
 opencv-python-headless
 openai
 scenedetect
