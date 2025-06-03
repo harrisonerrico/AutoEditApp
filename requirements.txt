@@ -7,3 +7,4 @@ openai
 whisper
 scenedetect
 clip-anytorch
+beautifulsoup4
