@@ -1,10 +1,11 @@
 streamlit
-opencv-python-headless
-numpy
-Pillow
-torch
 openai
 whisper
+torch
+numpy
+opencv-python-headless
+Pillow
 scenedetect
-clip-anytorch
+requests
 beautifulsoup4
+clip-anytorch
