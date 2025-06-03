@@ -40,20 +40,37 @@ if ref_input_method == "Upload from device":
             reference_path = temp_ref.name
 else:
     def download_drive_file(file_url, output_path):
+        """
+        Download a Google Drive file (handles large-file confirmation).
+        Returns True if successful, False otherwise.
+        """
         match = re.search(r"(?:file/d/|id=)([a-zA-Z0-9_-]{10,})", file_url)
         if not match:
             return False
         file_id = match.group(1)
+
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        try:
-            response = requests.get(download_url, stream=True)
-            if "text/html" in response.headers.get("Content-Type", ""):
-                return False
-            with open(output_path, "wb") as f:
-                f.write(response.content)
-            return True
-        except:
+        session = requests.Session()
+        response = session.get(download_url, stream=True)
+        token = None
+
+        for key, value in response.cookies.items():
+            if key.startswith("download_warning"):
+                token = value
+
+        if token:
+            download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
+            response = session.get(download_url, stream=True)
+
+        content_type = response.headers.get("Content-Type", "")
+        if "text/html" in content_type:
             return False
+
+        with open(output_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=32768):
+                if chunk:
+                    f.write(chunk)
+        return True
 
     reference_url = st.text_input("Paste Google Drive direct download link for reference video")
     reference_path = None
@@ -186,11 +203,11 @@ def get_gpt_edit_guide(features):
     openai.api_key = os.getenv("OPENAI_API_KEY")
     messages = [
         {
-            "role": "system",
+            "role": "system", 
             "content": "You are a professional video editor assistant. Given shot-level features, describe their purpose and how they contribute to the edit."
         },
         {
-            "role": "user",
+            "role": "user", 
             "content": f"Here is a list of shots with features: {json.dumps(features)}. Provide a JSON list of guidance on how to recreate these shots using different clips based on similarity of motion, brightness, and duration."
         }
     ]
@@ -240,7 +257,6 @@ def assign_raw_clips(media_folder, shot_data, model, preprocess):
             for file in files:
                 if file.lower().endswith(valid_extensions):
                     path = os.path.join(root, file)
-                    # Only use video files for visual matching
                     if file.lower().endswith((".mp4", ".mov")):
                         frame = extract_middle_frame(path, 1.0)
                         embedding = extract_frame_embedding(frame, model, preprocess)
@@ -264,8 +280,7 @@ def generate_auto_edit(shot_data, transcription_data):
             cmd = [
                 "ffmpeg", "-y", "-i", shot["match"],
                 "-ss", str(start_time), "-t", str(shot["duration"]),
-                "-vf", "scale=1920:1080",
-                output_name
+                "-vf", "scale=1920:1080", output_name
             ]
             subprocess.run(cmd)
 
