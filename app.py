@@ -20,6 +20,7 @@ from scenedetect.detectors import ContentDetector
 import zipfile
 import shutil
 import requests
+from bs4 import BeautifulSoup
 
 st.set_page_config(page_title="Smart Auto Edit", layout="wide")
 st.title("🎬 Smart Auto Edit – Reference-Based Editor")
@@ -43,24 +44,52 @@ else:
             reference_path = temp_ref.name
         st.success("Reference video downloaded successfully.")
 
-st.subheader("2. Raw Media Clips ZIP Input")
-media_input_method = st.radio("Choose input method for raw media:", ["Upload from device", "Provide Google Drive link"])
-if media_input_method == "Upload from device":
+st.subheader("2. Raw Media Clips Input")
+media_input_method = st.radio("Choose input method for raw media:", ["Upload ZIP from device", "Provide Google Drive ZIP link", "Provide Google Drive folder link"])
+media_zip_path = None
+media_folder_path = None
+
+if media_input_method == "Upload ZIP from device":
     media_file = st.file_uploader("Upload Raw Media Clips (.zip)", type=["zip"])
-    media_zip_path = None
     if media_file:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
             temp_zip.write(media_file.read())
             media_zip_path = temp_zip.name
-else:
+
+elif media_input_method == "Provide Google Drive ZIP link":
     media_url = st.text_input("Paste Google Drive direct download link for ZIP file")
-    media_zip_path = None
     if media_url:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
             response = requests.get(media_url)
             temp_zip.write(response.content)
             media_zip_path = temp_zip.name
         st.success("Media ZIP downloaded successfully.")
+
+elif media_input_method == "Provide Google Drive folder link":
+    folder_url = st.text_input("Paste Google Drive folder share link")
+    if folder_url:
+        def scrape_drive_folder(share_url, dest_folder):
+            response = requests.get(share_url)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for a_tag in soup.find_all('a'):
+                href = a_tag.get('href', '')
+                if "uc?id=" in href or "file/d/" in href:
+                    file_id = None
+                    if "uc?id=" in href:
+                        file_id = href.split("uc?id=")[-1].split("&")[0]
+                    elif "file/d/" in href:
+                        file_id = href.split("file/d/")[-1].split("/")[0]
+                    if file_id:
+                        dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                        ext = href.split('.')[-1].lower()
+                        if ext in ["mp4", "mov", "wav", "mp3"]:
+                            file_resp = requests.get(dl_url)
+                            if file_resp.ok:
+                                with open(os.path.join(dest_folder, f"file_{file_id}.{ext}"), 'wb') as out_file:
+                                    out_file.write(file_resp.content)
+        media_folder_path = tempfile.mkdtemp()
+        scrape_drive_folder(folder_url, media_folder_path)
+        st.success("All supported media files downloaded from folder.")
 
 scenes = []
 edit_guide = []
@@ -155,7 +184,7 @@ def assign_raw_clips(media_folder, shot_data, model, preprocess):
         best_path = None
         for root, _, files in os.walk(media_folder):
             for file in files:
-                if file.endswith(".mp4"):
+                if file.endswith((".mp4", ".mov", ".wav", ".mp3")):
                     path = os.path.join(root, file)
                     frame = extract_middle_frame(path, 1.0)
                     embedding = extract_frame_embedding(frame, model, preprocess)
@@ -204,11 +233,14 @@ def export_to_capcut_xml(shot_data):
     tree = ET.ElementTree(root)
     tree.write("capcut_export.xml")
 
-if reference_path and media_zip_path:
+if reference_path and (media_zip_path or media_folder_path):
     with st.spinner("Analyzing reference and generating auto edit..."):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with zipfile.ZipFile(media_zip_path, 'r') as zip_ref:
-                zip_ref.extractall(tmp_dir)
+            if media_zip_path:
+                with zipfile.ZipFile(media_zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(tmp_dir)
+            elif media_folder_path:
+                tmp_dir = media_folder_path
 
             st.info("Running scene detection...")
             scenes = analyze_reference(reference_path)
