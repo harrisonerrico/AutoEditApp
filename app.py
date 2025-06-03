@@ -2,8 +2,6 @@ import os
 import subprocess
 import tempfile
 import numpy as np
-import wave
-import contextlib
 import xml.etree.ElementTree as ET
 from datetime import timedelta
 from PIL import Image
@@ -26,63 +24,79 @@ import re
 st.set_page_config(page_title="Smart Auto Edit", layout="wide")
 st.title("🎬 Smart Auto Edit – Reference-Based Editor")
 
+# ----------------------
+# 1. Reference Video Input
+# ----------------------
 st.subheader("1. Reference Video Input")
 ref_input_method = st.radio(
     "Choose input method for the reference video:",
     ["Upload from device", "Provide Google Drive link"]
 )
+
+reference_path = None
+
 if ref_input_method == "Upload from device":
-    reference_file = st.file_uploader("Upload Edited Reference Video", type=["mp4"])
-    reference_path = None
+    reference_file = st.file_uploader("Upload Edited Reference Video", type=["mp4", "mov"])
     if reference_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_ref:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(reference_file.name)[1]) as temp_ref:
             temp_ref.write(reference_file.read())
             reference_path = temp_ref.name
+
 else:
     def download_drive_file(file_url, output_path):
         """
         Download a Google Drive file (handles large-file confirmation).
-        Returns True if successful, False otherwise.
+        Returns (True, debug_info) if successful, (False, debug_info) otherwise.
+        debug_info is a dict: {'content_type': str, 'bytes_written': int}
         """
         match = re.search(r"(?:file/d/|id=)([a-zA-Z0-9_-]{10,})", file_url)
         if not match:
-            return False
+            return False, {"error": "Could not find file ID in URL."}
         file_id = match.group(1)
 
-        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         session = requests.Session()
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         response = session.get(download_url, stream=True)
-        token = None
 
+        # If Drive sets a "download_warning" cookie, we need to confirm
+        token = None
         for key, value in response.cookies.items():
             if key.startswith("download_warning"):
                 token = value
+                break
 
         if token:
             download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
             response = session.get(download_url, stream=True)
 
-        content_type = response.headers.get("Content-Type", "")
+        content_type = response.headers.get("Content-Type", "unknown")
+        # If it's HTML, we're not getting raw video bytes
         if "text/html" in content_type:
-            return False
+            return False, {"content_type": content_type}
 
+        bytes_written = 0
         with open(output_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=32768):
                 if chunk:
                     f.write(chunk)
-        return True
+                    bytes_written += len(chunk)
 
-    reference_url = st.text_input("Paste Google Drive direct download link for reference video")
-    reference_path = None
+        return True, {"content_type": content_type, "bytes_written": bytes_written}
+
+    reference_url = st.text_input("Paste Google Drive share link for reference video")
     if reference_url:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_ref:
-            success = download_drive_file(reference_url, temp_ref.name)
+            success, info = download_drive_file(reference_url, temp_ref.name)
             if success:
                 reference_path = temp_ref.name
                 st.success("Reference video downloaded successfully.")
             else:
-                st.error("Failed to download a valid video file from the provided Google Drive link.")
+                st.error(f"Failed to download a valid video. Content-Type: {info.get('content_type')}, Error: {info.get('error', '')}")
+                st.info("You can switch to 'Upload from device' to manually upload the file.")
 
+# ----------------------
+# 2. Raw Media Clips Input
+# ----------------------
 st.subheader("2. Raw Media Clips Input")
 media_input_method = st.radio(
     "Choose input method for raw media:",
@@ -99,11 +113,14 @@ if media_input_method == "Upload ZIP from device":
             media_zip_path = temp_zip.name
 
 elif media_input_method == "Provide Google Drive ZIP link":
-    media_url = st.text_input("Paste Google Drive direct download link for ZIP file")
+    media_url = st.text_input("Paste Google Drive share link for ZIP file")
     if media_url:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
-            response = requests.get(media_url)
-            temp_zip.write(response.content)
+            response = requests.get(media_url, stream=True)
+            # For large ZIPs, you might need the same token logic as above—assuming small enough for now
+            for chunk in response.iter_content(chunk_size=32768):
+                if chunk:
+                    temp_zip.write(chunk)
             media_zip_path = temp_zip.name
         st.success("Media ZIP downloaded successfully.")
 
@@ -123,34 +140,37 @@ elif media_input_method == "Provide Google Drive folder link":
                         file_id = href.split("file/d/")[-1].split("/")[0]
                     if file_id:
                         dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                        file_resp = requests.get(dl_url)
-                        content_type = file_resp.headers.get("Content-Type", "")
+                        file_resp = requests.get(dl_url, stream=True)
+                        ctype = file_resp.headers.get("Content-Type", "")
                         ext = None
-                        if "video/mp4" in content_type:
+                        if "video/mp4" in ctype:
                             ext = "mp4"
-                        elif "video/quicktime" in content_type:
+                        elif "video/quicktime" in ctype:
                             ext = "mov"
-                        elif "audio/wav" in content_type:
+                        elif "audio/wav" in ctype:
                             ext = "wav"
-                        elif "audio/mpeg" in content_type:
+                        elif "audio/mpeg" in ctype:
                             ext = "mp3"
-                        elif "audio/mp4" in content_type or "audio/m4a" in content_type:
+                        elif "audio/mp4" in ctype or "audio/m4a" in ctype:
                             ext = "m4a"
-                        elif "audio/aiff" in content_type:
+                        elif "audio/aiff" in ctype:
                             ext = "aiff"
-                        elif "audio/aac" in content_type:
+                        elif "audio/aac" in ctype:
                             ext = "aac"
                         if ext:
                             out_path = os.path.join(dest_folder, f"file_{file_id}.{ext}")
                             with open(out_path, "wb") as out_file:
-                                out_file.write(file_resp.content)
+                                for chunk in file_resp.iter_content(32768):
+                                    if chunk:
+                                        out_file.write(chunk)
+
         media_folder_path = tempfile.mkdtemp()
         scrape_drive_folder(folder_url, media_folder_path)
         st.success("All supported media files downloaded from folder.")
 
-# ------------------------------------------------------------------------------
-# Processing logic begins here
-
+# ----------------------
+# 3. Processing Logic
+# ----------------------
 scenes = []
 edit_guide = []
 shot_data = []
@@ -308,33 +328,4 @@ def export_to_capcut_xml(shot_data):
 
 if reference_path and (media_zip_path or media_folder_path):
     with st.spinner("Analyzing reference and generating auto edit..."):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            if media_zip_path:
-                with zipfile.ZipFile(media_zip_path, "r") as zip_ref:
-                    zip_ref.extractall(tmp_dir)
-            elif media_folder_path:
-                tmp_dir = media_folder_path
-
-            st.info("Running scene detection...")
-            scenes = analyze_reference(reference_path)
-            model, preprocess = clip.load("ViT-B/32", device="cpu")
-
-            st.info("Analyzing shot structure...")
-            shot_data = analyze_shot_structure(reference_path, scenes, model, preprocess)
-
-            st.info("Transcribing and classifying audio...")
-            transcription_data = transcribe_and_classify_audio(reference_path)
-
-            st.info("Getting GPT edit guidance (if available)...")
-            edit_guide = get_gpt_edit_guide(shot_data)
-
-            st.info("Assigning raw media to reference shots...")
-            shot_data = assign_raw_clips(tmp_dir, shot_data, model, preprocess)
-
-            st.info("Generating auto-edited video clips...")
-            generate_auto_edit(shot_data, transcription_data)
-
-            st.info("Exporting to CapCut XML...")
-            export_to_capcut_xml(shot_data)
-
-        st.success("Auto edit complete. All outputs generated.")
+        with tempfi
