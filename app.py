@@ -21,6 +21,7 @@ import zipfile
 import shutil
 import requests
 from bs4 import BeautifulSoup
+import re
 
 st.set_page_config(page_title="Smart Auto Edit", layout="wide")
 st.title("🎬 Smart Auto Edit – Reference-Based Editor")
@@ -35,14 +36,32 @@ if ref_input_method == "Upload from device":
             temp_ref.write(reference_file.read())
             reference_path = temp_ref.name
 else:
+    def download_drive_file(file_url, output_path):
+        match = re.search(r"(?:file/d/|id=)([a-zA-Z0-9_-]{10,})", file_url)
+        if not match:
+            return False
+        file_id = match.group(1)
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        try:
+            response = requests.get(download_url, stream=True)
+            if "text/html" in response.headers.get("Content-Type", ""):
+                return False
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+            return True
+        except:
+            return False
+
     reference_url = st.text_input("Paste Google Drive direct download link for reference video")
     reference_path = None
     if reference_url:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_ref:
-            response = requests.get(reference_url)
-            temp_ref.write(response.content)
-            reference_path = temp_ref.name
-        st.success("Reference video downloaded successfully.")
+            success = download_drive_file(reference_url, temp_ref.name)
+            if success:
+                reference_path = temp_ref.name
+                st.success("Reference video downloaded successfully.")
+            else:
+                st.error("Failed to download a valid video file from the provided Google Drive link.")
 
 st.subheader("2. Raw Media Clips Input")
 media_input_method = st.radio("Choose input method for raw media:", ["Upload ZIP from device", "Provide Google Drive ZIP link", "Provide Google Drive folder link"])
@@ -81,42 +100,23 @@ elif media_input_method == "Provide Google Drive folder link":
                         file_id = href.split("file/d/")[-1].split("/")[0]
                     if file_id:
                         dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                        ext = href.split('.')[-1].lower()
-                        if ext in ["mp4", "mov", "wav", "mp3"]:
-                            file_resp = requests.get(dl_url)
-                            if file_resp.ok:
-                                with open(os.path.join(dest_folder, f"file_{file_id}.{ext}"), 'wb') as out_file:
-                                    out_file.write(file_resp.content)
+                        file_resp = requests.get(dl_url)
+                        content_type = file_resp.headers.get("Content-Type", "")
+                        ext = None
+                        if "video/mp4" in content_type:
+                            ext = "mp4"
+                        elif "video/quicktime" in content_type:
+                            ext = "mov"
+                        elif "audio/wav" in content_type:
+                            ext = "wav"
+                        elif "audio/mpeg" in content_type:
+                            ext = "mp3"
+                        if ext:
+                            with open(os.path.join(dest_folder, f"file_{file_id}.{ext}"), 'wb') as out_file:
+                                out_file.write(file_resp.content)
         media_folder_path = tempfile.mkdtemp()
         scrape_drive_folder(folder_url, media_folder_path)
         st.success("All supported media files downloaded from folder.")
-
-scenes = []
-edit_guide = []
-shot_data = []
-transcription_data = []
-
-@st.cache_data
-def transcribe_and_classify_audio(video_path):
-    model = whisper.load_model("base")
-    result = model.transcribe(video_path)
-    segments = result.get("segments", [])
-    transcription = []
-    for segment in segments:
-        text = segment.get("text", "")
-        if any(keyword in text.lower() for keyword in ["uh", "um", "like", "i think", "you know"]):
-            segment_type = "speech"
-        elif any(char.isalpha() for char in text) and text.strip().endswith("."):
-            segment_type = "speech"
-        else:
-            segment_type = "music"
-        transcription.append({"start": segment["start"], "end": segment["end"], "type": segment_type, "text": text})
-    return transcription
-
-@st.cache_data
-def extract_middle_frame(video_path, timestamp):
-    cap = cv2.VideoCapture(video_path)
-    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
     success, frame = cap.read()
     cap.release()
     return frame if success else None
