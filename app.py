@@ -19,12 +19,48 @@ from scenedetect import VideoManager, SceneManager
 from scenedetect.detectors import ContentDetector
 import zipfile
 import shutil
+import requests
 
 st.set_page_config(page_title="Smart Auto Edit", layout="wide")
 st.title("🎬 Smart Auto Edit – Reference-Based Editor")
 
-reference_path = st.file_uploader("1. Upload Edited Reference Video", type=["mp4"])
-media_zip = st.file_uploader("2. Upload Raw Media Clips (ZIP)", type=["zip"])
+st.subheader("1. Reference Video Input")
+ref_input_method = st.radio("Choose input method for the reference video:", ["Upload from device", "Provide Google Drive link"])
+if ref_input_method == "Upload from device":
+    reference_file = st.file_uploader("Upload Edited Reference Video", type=["mp4"])
+    reference_path = None
+    if reference_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_ref:
+            temp_ref.write(reference_file.read())
+            reference_path = temp_ref.name
+else:
+    reference_url = st.text_input("Paste Google Drive direct download link for reference video")
+    reference_path = None
+    if reference_url:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_ref:
+            response = requests.get(reference_url)
+            temp_ref.write(response.content)
+            reference_path = temp_ref.name
+        st.success("Reference video downloaded successfully.")
+
+st.subheader("2. Raw Media Clips ZIP Input")
+media_input_method = st.radio("Choose input method for raw media:", ["Upload from device", "Provide Google Drive link"])
+if media_input_method == "Upload from device":
+    media_file = st.file_uploader("Upload Raw Media Clips (.zip)", type=["zip"])
+    media_zip_path = None
+    if media_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
+            temp_zip.write(media_file.read())
+            media_zip_path = temp_zip.name
+else:
+    media_url = st.text_input("Paste Google Drive direct download link for ZIP file")
+    media_zip_path = None
+    if media_url:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
+            response = requests.get(media_url)
+            temp_zip.write(response.content)
+            media_zip_path = temp_zip.name
+        st.success("Media ZIP downloaded successfully.")
 
 scenes = []
 edit_guide = []
@@ -168,16 +204,10 @@ def export_to_capcut_xml(shot_data):
     tree = ET.ElementTree(root)
     tree.write("capcut_export.xml")
 
-if reference_path and media_zip:
+if reference_path and media_zip_path:
     with st.spinner("Analyzing reference and generating auto edit..."):
-        reference_file = reference_path
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as ref_temp:
-            ref_temp.write(reference_file.read())
-            ref_temp.flush()
-            reference_path = ref_temp.name
-
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with zipfile.ZipFile(media_zip, 'r') as zip_ref:
+            with zipfile.ZipFile(media_zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmp_dir)
 
             st.info("Running scene detection...")
