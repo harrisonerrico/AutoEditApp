@@ -1,9 +1,9 @@
 streamlit
+opencv-python-headless
 numpy
 Pillow
-opencv-python-headless==4.9.0.80
 torch
 openai
-clip-anytorch
 whisper
 scenedetect
+clip-anytorch
