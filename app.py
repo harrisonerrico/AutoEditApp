@@ -26,118 +26,164 @@ import re
 st.set_page_config(page_title="Smart Auto Edit", layout="wide")
 st.title("🎬 Smart Auto Edit – Reference-Based Editor")
 
-def download_large_file_from_drive(file_id, output_path):
-    session = requests.Session()
-    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    response = session.get(download_url, stream=True)
+# Upload Section
+st.subheader("1. Upload Reference Video and Raw Media")
+reference_file = st.file_uploader("Upload Edited Reference Video", type=["mp4", "mov"])
+media_zip = st.file_uploader("Upload Raw Media Clips (.zip)", type=["zip"])
 
-    token = None
-    for key, value in response.cookies.items():
-        if key.startswith("download_warning"):
-            token = value
-            break
-
-    if token:
-        download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
-        response = session.get(download_url, stream=True)
-
-    with open(output_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=32768):
-            if chunk:
-                f.write(chunk)
-
-st.subheader("1. Reference Video Input")
-ref_input_method = st.radio(
-    "Choose input method for the reference video:",
-    ["Upload from device", "Provide Google Drive link"]
-)
 reference_path = None
-if ref_input_method == "Upload from device":
-    reference_file = st.file_uploader("Upload Edited Reference Video", type=["mp4", "mov"])
-    if reference_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(reference_file.name)[1]) as temp_ref:
-            temp_ref.write(reference_file.read())
-            reference_path = temp_ref.name
-else:
-    reference_url = st.text_input("Paste Google Drive share link for reference video")
-    if reference_url:
-        match = re.search(r"(?:file/d/|id=)([a-zA-Z0-9_-]{10,})", reference_url)
-        if match:
-            file_id = match.group(1)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_ref:
-                try:
-                    download_large_file_from_drive(file_id, temp_ref.name)
-                    reference_path = temp_ref.name
-                    st.success("Reference video downloaded successfully.")
-                except Exception as e:
-                    st.error(f"Failed to download reference video. Error: {e}")
-
-st.subheader("2. Raw Media Clips Input")
-media_input_method = st.radio(
-    "Choose input method for raw media:",
-    ["Upload ZIP from device", "Provide Google Drive ZIP link", "Provide Google Drive folder link"]
-)
-media_zip_path = None
 media_folder_path = None
 
-if media_input_method == "Upload ZIP from device":
-    media_file = st.file_uploader("Upload Raw Media Clips (.zip)", type=["zip"])
-    if media_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
-            temp_zip.write(media_file.read())
-            media_zip_path = temp_zip.name
+if reference_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(reference_file.name)[1]) as tmp_ref:
+        tmp_ref.write(reference_file.read())
+        reference_path = tmp_ref.name
 
-elif media_input_method == "Provide Google Drive ZIP link":
-    media_url = st.text_input("Paste Google Drive direct download link for ZIP file")
-    if media_url:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
-            response = requests.get(media_url, stream=True)
-            for chunk in response.iter_content(chunk_size=32768):
-                if chunk:
-                    temp_zip.write(chunk)
-            media_zip_path = temp_zip.name
-        st.success("Media ZIP downloaded successfully.")
+if media_zip:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        zip_path = os.path.join(tmp_dir, media_zip.name)
+        with open(zip_path, "wb") as f:
+            f.write(media_zip.read())
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(tmp_dir)
+        media_folder_path = tmp_dir
 
-elif media_input_method == "Provide Google Drive folder link":
-    folder_url = st.text_input("Paste Google Drive folder share link")
-    if folder_url:
-        def scrape_drive_folder(share_url, dest_folder):
-            response = requests.get(share_url)
-            soup = BeautifulSoup(response.text, "html.parser")
-            for a_tag in soup.find_all("a"):
-                href = a_tag.get("href", "")
-                if "uc?id=" in href or "file/d/" in href:
-                    file_id = None
-                    if "uc?id=" in href:
-                        file_id = href.split("uc?id=")[-1].split("&")[0]
-                    elif "file/d/" in href:
-                        file_id = href.split("file/d/")[-1].split("/")[0]
-                    if file_id:
-                        dl_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                        file_resp = requests.get(dl_url, stream=True)
-                        ctype = file_resp.headers.get("Content-Type", "")
-                        ext = None
-                        if "video/mp4" in ctype:
-                            ext = "mp4"
-                        elif "video/quicktime" in ctype:
-                            ext = "mov"
-                        elif "audio/wav" in ctype:
-                            ext = "wav"
-                        elif "audio/mpeg" in ctype:
-                            ext = "mp3"
-                        elif "audio/mp4" in ctype or "audio/m4a" in ctype:
-                            ext = "m4a"
-                        elif "audio/aiff" in ctype:
-                            ext = "aiff"
-                        elif "audio/aac" in ctype:
-                            ext = "aac"
-                        if ext:
-                            out_path = os.path.join(dest_folder, f"file_{file_id}.{ext}")
-                            with open(out_path, "wb") as out_file:
-                                for chunk in file_resp.iter_content(32768):
-                                    if chunk:
-                                        out_file.write(chunk)
+# Smart Crop
 
-        media_folder_path = tempfile.mkdtemp()
-        scrape_drive_folder(folder_url, media_folder_path)
-        st.success("All supported media files downloaded from folder.")
+def detect_subject_crop(frame, target_ratio):
+    model_file = "MobileNetSSD_deploy.caffemodel"
+    config_file = "MobileNetSSD_deploy.prototxt"
+    if not os.path.exists(model_file) or not os.path.exists(config_file):
+        raise RuntimeError("DNN model files are missing.")
+    net = cv2.dnn.readNetFromCaffe(config_file, model_file)
+
+    blob = cv2.dnn.blobFromImage(frame, 0.007843, (300, 300), 127.5)
+    net.setInput(blob)
+    detections = net.forward()
+
+    (h, w) = frame.shape[:2]
+    best_box = None
+    max_confidence = 0
+
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > 0.5:
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
+            if confidence > max_confidence:
+                max_confidence = confidence
+                best_box = (startX, startY, endX, endY)
+
+    if best_box is not None:
+        startX, startY, endX, endY = best_box
+        subject_center_x = (startX + endX) // 2
+        subject_center_y = (startY + endY) // 2
+
+        if target_ratio > 1:
+            crop_w = min(w, int(h * target_ratio))
+            crop_h = h
+        else:
+            crop_w = w
+            crop_h = min(h, int(w / target_ratio))
+
+        x1 = max(0, subject_center_x - crop_w // 2)
+        y1 = max(0, subject_center_y - crop_h // 2)
+        x2 = min(w, x1 + crop_w)
+        y2 = min(h, y1 + crop_h)
+
+        return x1, y1, x2, y2
+    else:
+        return None
+
+# Whisper Transcription
+
+def transcribe_audio(video_path):
+    model = whisper.load_model("base")
+    result = model.transcribe(video_path)
+    return result
+
+# Extract Middle Frame
+
+def extract_middle_frame(video_path):
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) // 2))
+    success, frame = cap.read()
+    cap.release()
+    if success:
+        return frame
+    return None
+
+# Auto Edit Generation
+
+def auto_edit(reference_path, media_folder_path):
+    video_manager = VideoManager([reference_path])
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector(threshold=30.0))
+    video_manager.set_downscale_factor()
+    video_manager.start()
+    scene_manager.detect_scenes(frame_source=video_manager)
+    scenes = scene_manager.get_scene_list()
+    video_manager.release()
+
+    model, preprocess = clip.load("ViT-B/32", device="cpu")
+
+    cap = cv2.VideoCapture(reference_path)
+    ref_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    ref_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    ref_ratio = ref_width / ref_height
+
+    shots = []
+    for start_time, end_time in scenes:
+        shots.append({"start": start_time.get_seconds(), "end": end_time.get_seconds()})
+
+    output_clips = []
+    for i, shot in enumerate(shots):
+        for root, _, files in os.walk(media_folder_path):
+            for file in files:
+                if file.lower().endswith((".mp4", ".mov")):
+                    path = os.path.join(root, file)
+                    frame = extract_middle_frame(path)
+                    if frame is None:
+                        continue
+
+                    crop_box = detect_subject_crop(frame, ref_ratio)
+                    if crop_box is None:
+                        crop_filter = f"scale=1080:1920"
+                    else:
+                        x1, y1, x2, y2 = crop_box
+                        crop_filter = f"crop={x2-x1}:{y2-y1}:{x1}:{y1},scale=1080:1920"
+
+                    output_name = f"output_clip_{i+1:03d}.mp4"
+                    cmd = [
+                        "ffmpeg", "-y", "-i", path,
+                        "-vf", crop_filter,
+                        "-ss", str(shot["start"]), "-t", str(shot["end"] - shot["start"]),
+                        output_name
+                    ]
+                    subprocess.run(cmd)
+                    output_clips.append(output_name)
+
+    generate_capcut_xml(output_clips)
+
+# CapCut XML Export
+
+def generate_capcut_xml(output_clips):
+    root = ET.Element("project")
+    timeline = ET.SubElement(root, "timeline")
+    for clip in output_clips:
+        ET.SubElement(timeline, "clip", {
+            "src": clip,
+            "start": "0",
+            "duration": "5000"
+        })
+    tree = ET.ElementTree(root)
+    tree.write("capcut_project.xml")
+
+if st.button("Start Auto Edit"):
+    if reference_path and media_folder_path:
+        auto_edit(reference_path, media_folder_path)
+        st.success("Auto edit complete. Output clips and CapCut XML generated.")
+
+        with open("capcut_project.xml", "rb") as f:
+            st.download_button("Download CapCut XML", f, file_name="capcut_project.xml")
