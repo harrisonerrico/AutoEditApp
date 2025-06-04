@@ -1,12 +1,12 @@
 streamlit
+opencv-python-headless
 torch
 clip-anytorch
-opencv-python-headless
 openai
-scenedetect
 whisper
 pillow
 numpy
 requests
 beautifulsoup4
+scenedetect
 lxml
