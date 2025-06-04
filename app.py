@@ -101,6 +101,9 @@ def download_from_drive(drive_url, output_path):
         st.error(f"Failed to write file: {e}")
         return None
 
+    if not actual_path.endswith((".mp4", ".mov")):
+        st.error(f"Downloaded file does not seem to be a valid video: {actual_path}")
+        st.stop()
     return actual_path
 
 def scrape_drive_folder(folder_url, dest_folder):
