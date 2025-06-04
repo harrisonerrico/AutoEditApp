@@ -187,7 +187,7 @@ def extract_middle_frame_embedding(video_path):
 def detect_scenes(video_path):
     video_manager = VideoManager([video_path])
     scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector(threshold=35.0))
+    scene_manager.add_detector(ContentDetector(threshold=20.0))
     video_manager.set_downscale_factor()
     video_manager.start()
     scene_manager.detect_scenes(frame_source=video_manager)
