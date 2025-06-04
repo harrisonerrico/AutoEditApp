@@ -213,6 +213,11 @@ st.subheader("4. Auto-Edit Generation and Export")
 
 @st.cache_resource
 def auto_edit(reference_path, media_folder_path):
+    if not reference_path or not isinstance(reference_path, str) or not os.path.isfile(reference_path):
+        st.error(f"Reference video path is invalid: {reference_path}")
+        return []
+    st.text(f"Reference path: {reference_path}")
+    st.text(f"Is it a file? {os.path.isfile(reference_path)}")
     try:
         scenes = detect_scenes(reference_path)
     except Exception as e:
