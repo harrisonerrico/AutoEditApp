@@ -288,8 +288,8 @@ def auto_edit(reference_path, media_folder_path):
     try:
         with open("inputs.txt", "w") as f:
             for clip in output_clips:
-                f.write(f"file '{clip}'
-")
+                f.write(f"file '{clip}'\\n")
+
 
         subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "inputs.txt", "-c", "copy", "final_output.mp4"])
     except Exception as e:
