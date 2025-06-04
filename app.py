@@ -303,14 +303,24 @@ def auto_edit(reference_path, media_folder_path):
             else:
                 vf = f"scale={ref_width}:{ref_height}"
 
+                        # Determine audio overlay type using raw clip transcription
             audio_flag = "music"
-            for seg in transcription:
-                if seg['start'] <= start_time < seg['end']:
-                    audio_flag = seg['type']
-                    break
+            try:
+                raw_transcription = transcribe_audio(best_path)
+                # If the first segment in the raw clip is speech, classify as speech
+                if raw_transcription and raw_transcription[0]["type"] == "speech":
+                    audio_flag = "speech"
+            except Exception as e:
+                st.warning(f"Raw clip transcription failed: {e}")
 
             temp_vid = f"temp_{idx+1:03d}.mp4"
             cmd_video = [
+                "ffmpeg", "-y", "-i", best_path,
+                "-vf", vf,
+                "-ss", str(start_time), "-t", str(end_time - start_time),
+                "-an", temp_vid
+            ]
+
                 "ffmpeg", "-y", "-i", best_path,
                 "-vf", vf,
                 "-ss", str(start_time), "-t", str(end_time - start_time),
