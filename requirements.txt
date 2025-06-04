@@ -1,6 +1,7 @@
 streamlit
 opencv-python-headless
 torch
+torchvision
 clip-anytorch
 openai
 whisper
@@ -10,14 +11,5 @@ requests
 beautifulsoup4
 scenedetect
 lxml
-streamlit
-openai-whisper
-scenedetect
-torch
-torchvision
-opencv-python-headless
 ffmpeg-python
-requests
-beautifulsoup4
 git+https://github.com/openai/CLIP.git
-
