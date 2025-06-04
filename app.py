@@ -291,7 +291,13 @@ def auto_edit(reference_path, media_folder_path):
                 f.write(f"file '{clip}'\\n")
 
 
-        subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "inputs.txt", "-c", "copy", "final_output.mp4"])
+        result = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "inputs.txt", "-c", "copy", "final_output.mp4"], capture_output=True)
+        if result.returncode != 0:
+            st.error(f"FFmpeg failed: {result.stderr.decode()}")
+            return []
+        if not os.path.exists("final_output.mp4"):
+            st.error("Final video was not created. Please check if inputs are valid.")
+            return []
     except Exception as e:
         st.error(f"Concatenation failed: {e}")
 
